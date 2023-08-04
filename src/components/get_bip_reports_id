@@ -1,0 +1,133 @@
+#Lambda code to get bip reports id
+import requests
+import json
+from requests.auth import HTTPBasicAuth
+import os
+from bs4 import BeautifulSoup as bs
+import boto3
+import sys
+
+
+client = boto3.client('s3')
+s3_bucket = os.environ['s3_bucket']
+
+def lambda_handler(event, context):
+   try:
+      url = os.environ['url']
+      auth = HTTPBasicAuth(os.environ['ucm_user'], os.environ['ucm_pwd'])
+    ### Get the list of report File ID's
+      did_list=get_bip_report_id(url,auth)
+
+      for k in did_list:
+         fdict={"file_id":k}
+         jsonString = json.dumps(fdict)
+         jsonFile = open('/tmp/'+str(k)+".json", "w")
+         jsonFile.write(jsonString)
+         jsonFile.close()
+         upload_file(s3_bucket,'/tmp/'+str(k)+".json",'bip_report_id_json/'+str(k)+".json")
+         os.remove('/tmp/'+str(k)+".json")
+   except:
+      print("Error: During execution of get bip reports id")
+      error = sys.exc_info()
+      send_email_notification('Error: During execution of get bip reports id', error)
+   
+
+def get_bip_report_id(url,auth):
+   payload = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ucm="http://www.oracle.com/UCM">
+      <soapenv:Header/>
+      <soapenv:Body>
+         <ucm:GenericRequest webKey="cs">
+            <ucm:Service IdcService="GET_SEARCH_RESULTS">
+               <ucm:Document>
+                  <!--Zero or more repetitions:-->
+                  <ucm:Field name="QueryText">dDocTitle &lt;starts&gt; `BRKS_DWH_EXTRACT`&lt;AND&gt; xComments = `null`</ucm:Field>
+                  <ucm:Field name="searchFormType">standard</ucm:Field>
+                  <ucm:Field name="SortField">dDocCreatedDate</ucm:Field>
+                  <ucm:Field name="SortOrder">ASC</ucm:Field>
+                  <ucm:Field name="advSearch">True</ucm:Field>
+                  <ucm:Field name="ResultCount">200</ucm:Field>
+                  <ucm:Field name="startRow">1</ucm:Field>
+               </ucm:Document>
+            </ucm:Service>
+         </ucm:GenericRequest>
+      </soapenv:Body>
+   </soapenv:Envelope>"""
+# headers
+   headers = {
+      'Content-Type': 'text/xml; charset=utf-8'
+   }
+# POST request
+   response = requests.request("POST", url, headers=headers, data=payload,auth=auth)
+  
+
+### Putting all the id's in a list
+   did_list = list()
+   soup=bs(response.text,'html.parser')
+   s=soup.find_all( attrs={"name": "dID"})
+   for did in s:
+      did_list.append(did.text)
+   return did_list
+
+def upload_file(bucket, localpath, s3path):
+    client.upload_file(localpath, bucket, s3path)
+
+def send_email_notification(step, error):
+    SENDER = os.environ['SENDER']
+    RECIPIENT = os.environ['RECIPIENT']
+    AWS_REGION = os.environ['REGION']
+    SUBJECT = "Failure:Get BIP Reports ID"
+    BODY_TEXT = (str("File process failed for\r\n"+step)
+                 )
+
+# The HTML body of the email.
+    BODY_HTML = """<html>
+    <head></head>
+    <body>
+      <h1>Data extraction failed - {step}</h1>
+      <p>This email was sent to notify there has been error while executing get bip reports id,
+        Please check error log for detailed error information,
+        {error}
+      </p>
+    </body>
+    </html>
+                """.format(step=step, error=error)
+
+# The character encoding for the email.
+    CHARSET = "UTF-8"
+
+# Create a new SES resource and specify a region.
+    client_ses = boto3.client('ses', region_name=AWS_REGION)
+
+# Try to send the email.
+    try:
+        # Provide the contents of the email.
+        response = client_ses.send_email(
+            Destination={
+                'ToAddresses': [
+                    RECIPIENT,
+                ],
+            },
+            Message={
+                'Body': {
+                    'Html': {
+                        'Charset': CHARSET,
+                        'Data': BODY_HTML,
+                    },
+                    'Text': {
+                        'Charset': CHARSET,
+                        'Data': BODY_TEXT,
+                    },
+                },
+                'Subject': {
+                    'Charset': CHARSET,
+                    'Data': SUBJECT,
+                },
+            },
+            Source=SENDER,
+        )
+
+    except ClientError as e:
+        print(e.response['Error']['Message'])
+    else:
+        print("Email sent! Message ID:"),
+        print(response['MessageId'])

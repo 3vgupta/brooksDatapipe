@@ -1,0 +1,219 @@
+#Lambda code to get new manifest files id
+import requests
+from requests import Session
+from zeep import Client
+from zeep.transports import Transport
+import json
+from requests.auth import HTTPBasicAuth
+import os
+from bs4 import BeautifulSoup as bs
+from io import StringIO
+from datetime import datetime
+import logging
+import boto3
+import sys
+
+urllib3_logger = logging.getLogger('urllib3')
+urllib3_logger.setLevel(logging.CRITICAL)
+
+#client = boto3.client('s3',aws_access_key_id='',aws_secret_access_key='')
+client = boto3.client('s3')
+current_month = datetime.now().strftime('%m')
+current_year = datetime.now().strftime('%Y')
+current_day=datetime.now().strftime('%d')
+datefolder=str(current_year)+str(current_month)+str(current_day)
+s3_bucket = os.environ['s3_bucket']
+s3_bucket_q='sqs-test-bucket-brooks'
+path = os.environ['manifest_s3_path']+datetime.now().strftime('%m')+'-'+datetime.now().strftime('%Y')+'/'
+upload_folder = 'manifest/'+datefolder+'/'#os.environ['upload_folder']
+data_folder_q = os.environ['data_folder_q']
+
+def lambda_handler(event, context):
+   try:
+      url = os.environ['url']
+      auth = HTTPBasicAuth(os.environ['ucm_user'], os.environ['ucm_pwd'])
+    ### Get the list of Manifest File ID's
+      did_list=get_manifest_id(url,auth)
+   #print(did_list)
+    
+    ### Download Manifest Files
+      file_list=[]
+      for i in did_list:
+         op=download_ucm_files(url,i,'/tmp/')
+         file_list.append(op)
+      print('Manifest Files Download is complete')
+   #print(file_list)
+      list1=[]
+   #dt=''
+      for i in file_list:
+         dt=''
+         manifest_file_name=i.replace('/tmp/','')
+         upload_file(s3_bucket,i,upload_folder+manifest_file_name)
+         dt=dt+read_manifest(i)+'\n'
+         data=dt.split(';')
+         list2=[]
+         for j in range(0,len(data)):
+            if j%2==1:
+               list2.append(data[j])
+      # print(i)
+      # print(list2)
+         put_item_in_database(manifest_file_name,str(datetime.now()),str(list2))
+         list1.extend(list2)
+         os.remove(i)
+   #print(list1)
+      for k in list1:
+         fdict={"file_id":k}
+         jsonString = json.dumps(fdict)
+         jsonFile = open('/tmp/'+str(k)+".json", "w")
+         jsonFile.write(jsonString)
+         jsonFile.close()
+         upload_file(s3_bucket_q,'/tmp/'+str(k)+".json",data_folder_q+str(k)+".json")
+         os.remove('/tmp/'+str(k)+".json")
+   except:
+      print("Error: During execution of get manifest file")
+      error = sys.exc_info()
+      send_email_notification('Error: During execution of get manifest file', error)
+   
+
+def put_item_in_database(file,timestmp,listvalue):
+   print('Loading data to dynamodb')
+   dynamodb_client = boto3.client("dynamodb")
+   table_name = 'dev_ucm_manifest_file_mapping'
+   response = dynamodb_client.put_item(
+   TableName=table_name,
+   Item={
+        "manifest_file_id": {"S": file},
+        "timestamp": {"S": timestmp},
+        "subject": {"S": listvalue},
+    },)
+ 
+def read_manifest(key):
+   ###
+   try:
+      with open(key) as manifest:
+         return manifest.read()
+   except IOError:
+      return None 
+
+def get_manifest_id(url,auth):
+   payload = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ucm="http://www.oracle.com/UCM">
+      <soapenv:Header/>
+      <soapenv:Body>
+         <ucm:GenericRequest webKey="cs">
+            <ucm:Service IdcService="GET_SEARCH_RESULTS">
+               <ucm:Document>
+                  <!--Zero or more repetitions:-->
+                  <ucm:Field name="QueryText">dDocTitle &lt;starts&gt; `MANIFEST_DATA_`&lt;AND&gt; xComments = ``</ucm:Field>
+                  <ucm:Field name="searchFormType">standard</ucm:Field>
+                  <ucm:Field name="SortField">dDocCreatedDate</ucm:Field>
+                  <ucm:Field name="SortOrder">ASC</ucm:Field>
+                  <ucm:Field name="ResultCount">200</ucm:Field>
+                  <ucm:Field name="advSearch">True</ucm:Field>
+                  <ucm:Field name="startRow">1</ucm:Field>
+               </ucm:Document>
+            </ucm:Service>
+         </ucm:GenericRequest>
+      </soapenv:Body>
+   </soapenv:Envelope>"""
+# headers
+   headers = {
+      'Content-Type': 'text/xml; charset=utf-8'
+   }
+# POST request
+   response = requests.request("POST", url, headers=headers, data=payload,auth=auth)
+  
+# prints the response
+   #print('This is response text')
+#print(response.text)
+### Putting all the id's in a list
+   did_list = list()
+   soup=bs(response.text,'html.parser')
+   s=soup.find_all( attrs={"name": "dID"})
+   for did in s:
+      did_list.append(did.text)
+   return did_list
+
+def download_ucm_files(url,file_id,pathlocal):
+   docid=file_id
+   session = Session()
+   session.auth = HTTPBasicAuth(os.environ['ucm_user'], os.environ['ucm_pwd'])
+   client = Client(url+'?WSDL',transport=Transport(session=session))
+   # Create Service Request
+   ser_request = client.get_type('ns0:Service')
+   ser = ser_request(Document= { 'Field': { 'name':'dID','_value_1':docid} } , IdcService= 'GET_FILE')
+   # Make request
+   res = client.service.GenericSoapOperation(Service=ser,webKey='cs')
+   # The response object will have the requested file as an attachment. Lets process this and save the file
+   fileName = pathlocal+docid+'-'+res['Service']['Document']['File'][0].href
+   with open(fileName , 'wb') as f:
+      f.write(res['Service']['Document']['File'][0].Contents)
+      return fileName
+
+
+
+
+def upload_file(bucket, localpath, s3path):
+    client.upload_file(localpath, bucket, s3path)
+
+
+
+def send_email_notification(step, error):
+    SENDER = os.environ['SENDER']
+    RECIPIENT = os.environ['RECIPIENT']
+    AWS_REGION = os.environ['REGION']
+    SUBJECT = "Failure:Get  Manifest Files"
+    BODY_TEXT = (str("File process failed for\r\n"+step)
+                 )
+
+# The HTML body of the email.
+    BODY_HTML = """<html>
+    <head></head>
+    <body>
+      <h1>Data extraction failed - {step}</h1>
+      <p>This email was sent to notify there has been error while executing get manifest files,
+        Please check error log for detailed error information,
+        {error}
+      </p>
+    </body>
+    </html>
+                """.format(step=step, error=error)
+
+# The character encoding for the email.
+    CHARSET = "UTF-8"
+
+# Create a new SES resource and specify a region.
+    client_ses = boto3.client('ses', region_name=AWS_REGION)
+
+# Try to send the email.
+    try:
+        # Provide the contents of the email.
+        response = client_ses.send_email(
+            Destination={
+                'ToAddresses': [
+                    RECIPIENT,
+                ],
+            },
+            Message={
+                'Body': {
+                    'Html': {
+                        'Charset': CHARSET,
+                        'Data': BODY_HTML,
+                    },
+                    'Text': {
+                        'Charset': CHARSET,
+                        'Data': BODY_TEXT,
+                    },
+                },
+                'Subject': {
+                    'Charset': CHARSET,
+                    'Data': SUBJECT,
+                },
+            },
+            Source=SENDER,
+        )
+
+    except ClientError as e:
+        print(e.response['Error']['Message'])
+    else:
+        print("Email sent! Message ID:"),
+        print(response['MessageId'])

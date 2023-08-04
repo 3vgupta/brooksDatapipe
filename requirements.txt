@@ -1,0 +1,9 @@
+pandas
+boto3
+zeep
+zipfile36
+requests
+bs4
+openpyxl
+datetime
+-e .
