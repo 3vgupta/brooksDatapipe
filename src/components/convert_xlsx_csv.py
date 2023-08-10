@@ -4,13 +4,10 @@ import pandas as pd
 from openpyxl import load_workbook
 import boto3
 import os
+import json
 from datetime import datetime
 
-bucket='sqs-test-bucket-brooks'
-download_folder='poc/excel/'
-upload_folder='poc/csv/'
-archive_folder='poc/archive/'
-file_name='CombinedFilesCopy'
+
 client = boto3.client('s3')
 
 
