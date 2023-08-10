@@ -15,6 +15,27 @@ client = boto3.client('s3')
 
 
 def lambda_handler(event, context):
+        if len(event["Records"]) > 1:
+            print('Multiple SQS events,'+str(len(event["Records"])))
+        for i in range(0, len(event["Records"])):
+            s3eventdata = json.loads(event["Records"][i]["body"])
+        #print(s3eventdata)
+            if len(s3eventdata["Records"]) > 1:
+                print('Multiple S3 events,'+str(len(s3eventdata["Records"])))
+        for j in range(0, len(s3eventdata["Records"])):
+            s3event = s3eventdata["Records"][j]
+            s3_bucket_q = s3event['s3']['bucket']['name']
+            sourceObjectKey = s3event["s3"]["object"]["key"]
+            download_folder=sourceObjectKey[:sourceObjectKey.rfind('/')+1]
+            upload_folder=download_folder.replace('excel','csv')
+            archive_folder=download_folder.replace('excel','archive')
+            bucket=s3_bucket_q
+            file_name=sourceObjectKey.replace(download_folder,'').replace('.xlsx','')
+            file_process(file_name,upload_folder,archive_folder,download_folder,bucket) 
+
+
+
+def file_process(file_name,upload_folder,archive_folder,download_folder,bucket):
     input_xlsx_file = '/tmp/'+file_name+'.xlsx'
     output_csv_file = '/tmp/'+file_name+'.csv'
     print('Downloading file from S3')
